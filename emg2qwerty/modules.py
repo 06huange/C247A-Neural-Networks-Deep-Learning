@@ -4,11 +4,14 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
 from collections.abc import Sequence
 
 import torch
 from torch import nn
 
+from dataclasses import dataclass
+from typing import Optional
 
 class SpectrogramNorm(nn.Module):
     """A `torch.nn.Module` that applies 2D batch normalization over spectrogram
@@ -278,3 +281,173 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 200000, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float32)
+            * (-torch.log(torch.tensor(10000.0)) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        T = x.size(0)
+        x = x + self.pe[:T].unsqueeze(1)
+        return self.dropout(x)
+
+
+class TransformerEncoder(nn.Module):
+    """
+    Input:  (T, N, D)
+    Output: (T, N, D)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        use_sinusoidal_pos_emb: bool = True,
+        max_len: int = 200000,
+        norm_first: bool = True,
+    ) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self._max_len = max_len
+        self._use_sinusoidal = use_sinusoidal_pos_emb
+
+        if use_sinusoidal_pos_emb:
+            self.pos_emb = SinusoidalPositionalEncoding(
+                d_model=d_model,
+                max_len=max_len,
+                dropout=dropout,
+            )
+        else:
+            self.pos_emb = nn.Embedding(max_len, d_model)
+            self.pos_dropout = nn.Dropout(dropout)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=False,
+            norm_first=norm_first,
+        )
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.out_norm = nn.LayerNorm(d_model)
+
+    def _make_padding_mask(self, lengths: torch.Tensor, T: int) -> torch.Tensor:
+        return torch.arange(T, device=lengths.device)[None, :] >= lengths[:, None]
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if inputs.dim() != 3:
+            raise ValueError(f"Expected inputs of shape (T, N, D), got {tuple(inputs.shape)}")
+
+        T, N, D = inputs.shape
+        if D != self.d_model:
+            raise ValueError(f"Expected D == d_model ({self.d_model}), got D={D}")
+        if T > self._max_len:
+            raise ValueError(f"T={T} exceeds max_len={self._max_len}. Increase max_len in TransformerEncoder.")
+
+        x = inputs
+
+        if self._use_sinusoidal:
+            x = self.pos_emb(x)
+        else:
+            pos = torch.arange(T, device=x.device)
+            x = x + self.pos_emb(pos).unsqueeze(1)
+            x = self.pos_dropout(x)
+
+        src_key_padding_mask = (
+            self._make_padding_mask(lengths, T) if lengths is not None else None
+        )
+
+        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
+        return self.out_norm(x)
+
+
+class ConvTransformerEncoder(nn.Module):
+    """
+    Input:  (T, N, D)
+    Output: (T, N, D)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
+        conv_kernel_size: int = 5,
+        conv_layers: int = 2,
+        use_sinusoidal_pos_emb: bool = True,
+        max_len: int = 200000,
+        norm_first: bool = True,
+    ) -> None:
+        super().__init__()
+
+        assert conv_kernel_size % 2 == 1
+
+        conv_blocks: list[nn.Module] = []
+        for _ in range(conv_layers):
+            conv_blocks.extend(
+                [
+                    nn.Conv1d(
+                        in_channels=d_model,
+                        out_channels=d_model,
+                        kernel_size=conv_kernel_size,
+                        stride=1,
+                        padding=conv_kernel_size // 2,
+                    ),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+        self.conv = nn.Sequential(*conv_blocks)
+
+        self.transformer = TransformerEncoder(
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            use_sinusoidal_pos_emb=use_sinusoidal_pos_emb,
+            max_len=max_len,
+            norm_first=norm_first,
+        )
+        self.out_norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if inputs.dim() != 3:
+            raise ValueError(f"Expected inputs of shape (T, N, D), got {tuple(inputs.shape)}")
+
+        x = inputs.permute(1, 2, 0)   # (N, D, T)
+        x = self.conv(x)
+        x = x.permute(2, 0, 1)        # (T, N, D)
+
+        x = x + inputs
+        x = self.out_norm(x)
+
+        return self.transformer(x, lengths=lengths)
