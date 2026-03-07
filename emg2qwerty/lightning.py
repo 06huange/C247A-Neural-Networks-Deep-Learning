@@ -25,7 +25,7 @@ from emg2qwerty.modules import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
-    ConvTransformerEncoder
+    CNNTransformerEncoder,
 )
 from emg2qwerty.transforms import Transform
 
@@ -298,9 +298,12 @@ class TransformerCTCModule(pl.LightningModule):
             mlp_features=mlp_features,
             num_bands=self.NUM_BANDS,
         )
-        self.encoder = instantiate(transformer, d_model=num_features)
+
+        self.encoder = instantiate(transformer, in_features=num_features)
+
+        encoder_out_dim = self.encoder.transformer.d_model
         self.classifier = nn.Sequential(
-            nn.Linear(num_features, charset().num_classes),
+            nn.Linear(encoder_out_dim, charset().num_classes),
             nn.LogSoftmax(dim=-1),
         )
 
@@ -319,13 +322,19 @@ class TransformerCTCModule(pl.LightningModule):
         self,
         inputs: torch.Tensor,
         input_lengths: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         x = self.norm(inputs)
         x = self.mlp(x)
         x = torch.flatten(x, start_dim=2)
-        x = self.encoder(x, lengths=input_lengths)
+
+        x, emission_lengths = self.encoder(
+            x,
+            lengths=input_lengths,
+            return_lengths=True,
+        )
+
         x = self.classifier(x)
-        return x
+        return x, emission_lengths
 
     def _step(
         self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
@@ -336,8 +345,7 @@ class TransformerCTCModule(pl.LightningModule):
         target_lengths = batch["target_lengths"]
         N = len(input_lengths)
 
-        emissions = self.forward(inputs, input_lengths)
-        emission_lengths = input_lengths
+        emissions, emission_lengths = self.forward(inputs, input_lengths)
 
         loss = self.ctc_loss(
             log_probs=emissions,

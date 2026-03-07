@@ -451,3 +451,131 @@ class ConvTransformerEncoder(nn.Module):
         x = self.out_norm(x)
 
         return self.transformer(x, lengths=lengths)
+
+class ConvFrontend1D(nn.Module):
+    """
+    Input:  (T, N, D_in)
+    Output: (T_out, N, D_out)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        channels: Sequence[int] = (64, 128, 256),
+        kernel_sizes: Sequence[int] = (7, 5, 3),
+        strides: Sequence[int] = (2, 2, 1),
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+
+        assert len(channels) == len(kernel_sizes) == len(strides)
+
+        layers: list[nn.Module] = []
+        c_in = in_features
+        for c_out, k, s in zip(channels, kernel_sizes, strides):
+            assert k % 2 == 1, "Use odd kernel sizes for same-style padding"
+            layers.extend(
+                [
+                    nn.Conv1d(
+                        in_channels=c_in,
+                        out_channels=c_out,
+                        kernel_size=k,
+                        stride=s,
+                        padding=k // 2,
+                    ),
+                    nn.BatchNorm1d(c_out),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+            c_in = c_out
+
+        self.network = nn.Sequential(*layers)
+        self.out_features = c_in
+        self.strides = tuple(strides)
+        self.kernel_sizes = tuple(kernel_sizes)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.dim() != 3:
+            raise ValueError(f"Expected inputs of shape (T, N, D), got {tuple(inputs.shape)}")
+
+        # (T, N, D) -> (N, D, T)
+        x = inputs.permute(1, 2, 0)
+        x = self.network(x)
+        # (N, D_out, T_out) -> (T_out, N, D_out)
+        return x.permute(2, 0, 1)
+
+    def output_lengths(self, input_lengths: torch.Tensor) -> torch.Tensor:
+        """
+        Exact Conv1d length formula applied layer by layer:
+        L_out = floor((L_in + 2p - (k - 1) - 1) / s + 1)
+        with dilation = 1.
+        """
+        lengths = input_lengths.clone()
+        for k, s in zip(self.kernel_sizes, self.strides):
+            p = k // 2
+            lengths = torch.div(lengths + 2 * p - (k - 1) - 1, s, rounding_mode="floor") + 1
+        return lengths
+
+class CNNTransformerEncoder(nn.Module):
+    """
+    Input:  (T, N, D_in)
+    Output: (T_out, N, d_model)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        d_model: int = 256,
+        cnn_channels: Sequence[int] = (64, 128, 256),
+        cnn_kernel_sizes: Sequence[int] = (7, 5, 3),
+        cnn_strides: Sequence[int] = (2, 2, 1),
+        nhead: int = 8,
+        num_layers: int = 3,
+        dim_feedforward: int = 512,
+        dropout: float = 0.1,
+        use_sinusoidal_pos_emb: bool = True,
+        max_len: int = 200000,
+        norm_first: bool = True,
+    ) -> None:
+        super().__init__()
+
+        self.frontend = ConvFrontend1D(
+            in_features=in_features,
+            channels=cnn_channels,
+            kernel_sizes=cnn_kernel_sizes,
+            strides=cnn_strides,
+            dropout=dropout,
+        )
+
+        self.proj = nn.Linear(self.frontend.out_features, d_model)
+
+        self.transformer = TransformerEncoder(
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            use_sinusoidal_pos_emb=use_sinusoidal_pos_emb,
+            max_len=max_len,
+            norm_first=norm_first,
+        )
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+        return_lengths: bool = False,
+    ):
+        x = self.frontend(inputs)   # (T_out, N, C_out)
+        x = self.proj(x)            # (T_out, N, d_model)
+
+        out_lengths = None
+        if lengths is not None:
+            out_lengths = self.frontend.output_lengths(lengths)
+
+        x = self.transformer(x, lengths=out_lengths)
+
+        if return_lengths:
+            return x, out_lengths
+        return x

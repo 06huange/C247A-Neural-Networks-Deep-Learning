@@ -1,0 +1,28 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.TransformerCTCModule
+  in_features: 528
+  mlp_features: [192]
+
+  transformer:
+    _target_: emg2qwerty.modules.CNNTransformerEncoder
+    cnn_channels: [64, 128, 256]
+    cnn_kernel_sizes: [7,5,3]
+    cnn_strides: [2,2,2]
+    d_model: 384
+    nhead: 8
+    num_layers: 4
+    dim_feedforward: 1024
+    dropout: 0.1
+    use_sinusoidal_pos_emb: true
+    max_len: 200000
+    norm_first: true
+
+  optimizer: ${optimizer}
+  lr_scheduler: ${lr_scheduler}
+  decoder: ${decoder}
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000
+  padding: [1800, 200]
