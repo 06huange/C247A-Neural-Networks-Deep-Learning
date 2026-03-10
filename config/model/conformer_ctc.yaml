@@ -1,15 +1,19 @@
 # @package _global_
 module:
-  _target_: emg2qwerty.lightning.TransformerCTCModule
+  _target_: emg2qwerty.lightning.ConformerCTCModule
   in_features: 528
   mlp_features: [192]
 
-  transformer:
-    _target_: emg2qwerty.modules.TransformerEncoder
+  conformer:
+    _target_: emg2qwerty.modules.ConformerEncoder
     d_model: 384
+    cnn_channels: [64, 128, 256]
+    cnn_kernel_sizes: [7, 5, 3]
+    cnn_strides: [2, 2, 1]
     nhead: 8
     num_layers: 4
     dim_feedforward: 1024
+    conv_kernel_size: 15
     dropout: 0.1
     use_sinusoidal_pos_emb: true
     max_len: 200000

@@ -1,14 +1,14 @@
 # @package _global_
 module:
-  _target_: emg2qwerty.lightning.TransformerCTCModule
+  _target_: emg2qwerty.lightning.CNNTransformerCTCModule
   in_features: 528
   mlp_features: [192]
 
   transformer:
     _target_: emg2qwerty.modules.CNNTransformerEncoder
     cnn_channels: [64, 128, 256]
-    cnn_kernel_sizes: [7,5,3]
-    cnn_strides: [2,2,2]
+    cnn_kernel_sizes: [7, 5, 3]
+    cnn_strides: [2, 2, 1]
     d_model: 384
     nhead: 8
     num_layers: 4

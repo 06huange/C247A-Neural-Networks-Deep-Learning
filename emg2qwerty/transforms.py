@@ -153,6 +153,36 @@ class TemporalAlignmentJitter:
 
         return torch.stack([left, right], dim=self.stack_dim)
 
+@dataclass
+class Resample:
+    """Resamples the raw EMG signal along the time dimension.
+
+    The input must be of shape (T, ...), where T is the time dimension.
+    This transform rescales the time axis from `orig_freq` to `new_freq`
+    and returns a tensor with the same non-time dimensions.
+
+    Args:
+        orig_freq (int): Original sampling rate of the raw signal.
+        new_freq (int): Target sampling rate after resampling.
+    """
+
+    orig_freq: int
+    new_freq: int
+
+    def __post_init__(self) -> None:
+        if self.orig_freq <= 0 or self.new_freq <= 0:
+            raise ValueError("orig_freq and new_freq must be positive")
+        self.resampler = torchaudio.transforms.Resample(
+            orig_freq=self.orig_freq,
+            new_freq=self.new_freq,
+        )
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        # Input: (T, ...)
+        # Move time to the end so torchaudio resamples the last dimension
+        x = tensor.movedim(0, -1)  # (..., T)
+        x = self.resampler(x)      # (..., T_new)
+        return x.movedim(-1, 0)    # (T_new, ...)
 
 @dataclass
 class LogSpectrogram:

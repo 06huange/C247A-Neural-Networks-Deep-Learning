@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 import torch
 from torch import nn
-
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -575,6 +575,340 @@ class CNNTransformerEncoder(nn.Module):
             out_lengths = self.frontend.output_lengths(lengths)
 
         x = self.transformer(x, lengths=out_lengths)
+
+        if return_lengths:
+            return x, out_lengths
+        return x
+
+class CNNEncoder(nn.Module):
+    """
+    Pure 1D CNN sequence encoder.
+
+    Input:  (T, N, D_in)
+    Output: (T_out, N, D_out)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        channels: Sequence[int] = (64, 128, 256),
+        kernel_sizes: Sequence[int] = (7, 5, 3),
+        strides: Sequence[int] = (2, 2, 1),
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+
+        assert len(channels) == len(kernel_sizes) == len(strides)
+
+        layers: list[nn.Module] = []
+        c_in = in_features
+        for c_out, k, s in zip(channels, kernel_sizes, strides):
+            assert k % 2 == 1, "Use odd kernel sizes for same-style padding"
+            layers.extend(
+                [
+                    nn.Conv1d(
+                        in_channels=c_in,
+                        out_channels=c_out,
+                        kernel_size=k,
+                        stride=s,
+                        padding=k // 2,
+                    ),
+                    nn.BatchNorm1d(c_out),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+            c_in = c_out
+
+        self.network = nn.Sequential(*layers)
+        self.out_features = c_in
+        self.kernel_sizes = tuple(kernel_sizes)
+        self.strides = tuple(strides)
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+        return_lengths: bool = False,
+    ):
+        if inputs.dim() != 3:
+            raise ValueError(f"Expected inputs of shape (T, N, D), got {tuple(inputs.shape)}")
+
+        # (T, N, D) -> (N, D, T)
+        x = inputs.permute(1, 2, 0)
+        x = self.network(x)
+        # (N, D_out, T_out) -> (T_out, N, D_out)
+        x = x.permute(2, 0, 1)
+
+        out_lengths = None
+        if lengths is not None:
+            out_lengths = self.output_lengths(lengths)
+
+        if return_lengths:
+            return x, out_lengths
+        return x
+
+    def output_lengths(self, input_lengths: torch.Tensor) -> torch.Tensor:
+        """
+        Exact Conv1d length formula applied layer by layer:
+        L_out = floor((L_in + 2p - (k - 1) - 1) / s + 1)
+        with dilation = 1.
+        """
+        lengths = input_lengths.clone()
+        for k, s in zip(self.kernel_sizes, self.strides):
+            p = k // 2
+            lengths = torch.div(
+                lengths + 2 * p - (k - 1) - 1,
+                s,
+                rounding_mode="floor",
+            ) + 1
+        return lengths
+
+class FeedForwardModule(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        dim_feedforward: int,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, dim_feedforward),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class ConformerConvModule(nn.Module):
+    """
+    Input:  (T, N, D)
+    Output: (T, N, D)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        kernel_size: int = 15,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        assert kernel_size % 2 == 1, "kernel_size must be odd"
+
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.pointwise_conv1 = nn.Conv1d(
+            in_channels=d_model,
+            out_channels=2 * d_model,
+            kernel_size=1,
+        )
+        self.depthwise_conv = nn.Conv1d(
+            in_channels=d_model,
+            out_channels=d_model,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=d_model,
+        )
+        self.batch_norm = nn.BatchNorm1d(d_model)
+        self.pointwise_conv2 = nn.Conv1d(
+            in_channels=d_model,
+            out_channels=d_model,
+            kernel_size=1,
+        )
+        self.activation = nn.SiLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (T, N, D)
+        x = self.layer_norm(x)
+        x = x.permute(1, 2, 0)  # (N, D, T)
+
+        x = self.pointwise_conv1(x)  # (N, 2D, T)
+        x = nn.functional.glu(x, dim=1)  # (N, D, T)
+
+        x = self.depthwise_conv(x)  # (N, D, T)
+        x = self.batch_norm(x)
+        x = self.activation(x)
+
+        x = self.pointwise_conv2(x)  # (N, D, T)
+        x = self.dropout(x)
+
+        x = x.permute(2, 0, 1)  # (T, N, D)
+        return x
+
+
+class ConformerBlock(nn.Module):
+    """
+    Macaron-style conformer block:
+      x = x + 0.5 * FFN(x)
+      x = x + MHSA(x)
+      x = x + Conv(x)
+      x = x + 0.5 * FFN(x)
+      x = LayerNorm(x)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        conv_kernel_size: int = 15,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+
+        self.ffn1 = FeedForwardModule(
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.self_attn_norm = nn.LayerNorm(d_model)
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=nhead,
+            dropout=dropout,
+            batch_first=False,
+        )
+        self.self_attn_dropout = nn.Dropout(dropout)
+
+        self.conv_module = ConformerConvModule(
+            d_model=d_model,
+            kernel_size=conv_kernel_size,
+            dropout=dropout,
+        )
+
+        self.ffn2 = FeedForwardModule(
+            d_model=d_model,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+        self.final_norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        x = x + 0.5 * self.ffn1(x)
+
+        attn_in = self.self_attn_norm(x)
+        attn_out, _ = self.self_attn(
+            attn_in,
+            attn_in,
+            attn_in,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )
+        x = x + self.self_attn_dropout(attn_out)
+
+        x = x + self.conv_module(x)
+
+        x = x + 0.5 * self.ffn2(x)
+
+        x = self.final_norm(x)
+        return x
+
+
+class ConformerEncoder(nn.Module):
+    """
+    CNN frontend + projection + stacked conformer blocks.
+
+    Input:  (T, N, D_in)
+    Output: (T_out, N, d_model)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        d_model: int = 256,
+        cnn_channels: Sequence[int] = (64, 128, 256),
+        cnn_kernel_sizes: Sequence[int] = (7, 5, 3),
+        cnn_strides: Sequence[int] = (2, 2, 1),
+        nhead: int = 8,
+        num_layers: int = 4,
+        dim_feedforward: int = 1024,
+        conv_kernel_size: int = 15,
+        dropout: float = 0.1,
+        use_sinusoidal_pos_emb: bool = True,
+        max_len: int = 200000,
+    ) -> None:
+        super().__init__()
+
+        self.frontend = ConvFrontend1D(
+            in_features=in_features,
+            channels=cnn_channels,
+            kernel_sizes=cnn_kernel_sizes,
+            strides=cnn_strides,
+            dropout=dropout,
+        )
+        self.proj = nn.Linear(self.frontend.out_features, d_model)
+
+        self.use_sinusoidal_pos_emb = use_sinusoidal_pos_emb
+        self.max_len = max_len
+        self.d_model = d_model
+
+        if use_sinusoidal_pos_emb:
+            self.pos_emb = SinusoidalPositionalEncoding(
+                d_model=d_model,
+                max_len=max_len,
+                dropout=dropout,
+            )
+        else:
+            self.pos_emb = None
+
+        self.blocks = nn.ModuleList(
+            [
+                ConformerBlock(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dim_feedforward=dim_feedforward,
+                    conv_kernel_size=conv_kernel_size,
+                    dropout=dropout,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.out_norm = nn.LayerNorm(d_model)
+
+    def _make_padding_mask(self, lengths: torch.Tensor, T: int) -> torch.Tensor:
+        return torch.arange(T, device=lengths.device)[None, :] >= lengths[:, None]
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
+        return_lengths: bool = False,
+    ):
+        x = self.frontend(inputs)   # (T_out, N, C_out)
+        x = self.proj(x)            # (T_out, N, d_model)
+
+        out_lengths = None
+        if lengths is not None:
+            out_lengths = self.frontend.output_lengths(lengths)
+
+        T = x.size(0)
+        if T > self.max_len:
+            raise ValueError(
+                f"T={T} exceeds max_len={self.max_len}. Increase max_len in ConformerEncoder."
+            )
+
+        if self.pos_emb is not None:
+            x = self.pos_emb(x)
+
+        key_padding_mask = (
+            self._make_padding_mask(out_lengths, T)
+            if out_lengths is not None
+            else None
+        )
+
+        for block in self.blocks:
+            x = block(x, key_padding_mask=key_padding_mask)
+
+        x = self.out_norm(x)
 
         if return_lengths:
             return x, out_lengths

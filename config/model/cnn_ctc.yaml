@@ -1,0 +1,21 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.CNNCTCModule
+  in_features: 528
+  mlp_features: [192]
+
+  cnn:
+    _target_: emg2qwerty.modules.CNNEncoder
+    channels: [64, 128, 256]
+    kernel_sizes: [9, 7, 5]
+    strides: [1, 2, 1]
+    dropout: 0.05
+
+  optimizer: ${optimizer}
+  lr_scheduler: ${lr_scheduler}
+  decoder: ${decoder}
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000
+  padding: [1800, 200]
