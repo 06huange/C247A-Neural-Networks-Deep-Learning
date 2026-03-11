@@ -30,6 +30,7 @@ from emg2qwerty.modules import (
     CNNEncoder,
     ConformerEncoder,
 )
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from emg2qwerty.transforms import Transform
 
 
@@ -46,6 +47,8 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         train_transform: Transform[np.ndarray, torch.Tensor],
         val_transform: Transform[np.ndarray, torch.Tensor],
         test_transform: Transform[np.ndarray, torch.Tensor],
+        train_subset_fraction: float = 1.0,
+        subset_seed: int = 42,
     ) -> None:
         super().__init__()
 
@@ -63,6 +66,9 @@ class WindowedEMGDataModule(pl.LightningDataModule):
         self.val_transform = val_transform
         self.test_transform = test_transform
 
+        self.train_subset_fraction = train_subset_fraction
+        self.subset_seed = subset_seed
+
     def setup(self, stage: str | None = None) -> None:
         self.train_dataset = ConcatDataset(
             [
@@ -76,6 +82,22 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                 for hdf5_path in self.train_sessions
             ]
         )
+
+        if self.train_subset_fraction < 1.0:
+            total = len(self.train_dataset)
+            subset_size = max(1, int(total * self.train_subset_fraction))
+
+            rng = np.random.default_rng(self.subset_seed)
+            indices = rng.permutation(total)[:subset_size]
+            indices = sorted(indices.tolist())
+
+            self.train_dataset = Subset(self.train_dataset, indices)
+
+            print(
+                f"Using train subset: {subset_size}/{total} "
+                f"({100 * self.train_subset_fraction:.1f}%)"
+            )
+
         self.val_dataset = ConcatDataset(
             [
                 WindowedEMGDataset(
@@ -682,14 +704,16 @@ class ConformerCTCModule(pl.LightningModule):
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
         decoder: DictConfig,
+        electrode_channels: int = 16,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
 
+        self.electrode_channels = electrode_channels
         num_features = self.NUM_BANDS * mlp_features[-1]
 
         self.norm = SpectrogramNorm(
-            channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS
+            channels=self.NUM_BANDS * self.electrode_channels
         )
         self.mlp = MultiBandRotationInvariantMLP(
             in_features=in_features,
@@ -744,6 +768,9 @@ class ConformerCTCModule(pl.LightningModule):
         input_lengths = batch["input_lengths"]
         target_lengths = batch["target_lengths"]
         N = len(input_lengths)
+
+        selected_channels = list(range(self.electrode_channels))
+        inputs = inputs[:, :, :, selected_channels, :]
 
         emissions, emission_lengths = self.forward(inputs, input_lengths)
 
