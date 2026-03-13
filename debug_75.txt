@@ -1,0 +1,279 @@
+[2026-03-11 05:39:36,045][__main__][INFO] - 
+Config:
+user: single_user
+dataset:
+  train:
+  - user: 89335547
+    session: 2021-06-03-1622765527-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-02-1622681518-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-04-1622863166-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-07-22-1627003020-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-07-21-1626916256-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-07-22-1627004019-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-05-1622885888-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-02-1622679967-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-03-1622764398-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-07-21-1626917264-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-05-1622889105-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-03-1622766673-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-04-1622861066-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-07-22-1627001995-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-06-05-1622884635-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  - user: 89335547
+    session: 2021-07-21-1626915176-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  val:
+  - user: 89335547
+    session: 2021-06-04-1622862148-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  test:
+  - user: 89335547
+    session: 2021-06-02-1622682789-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f
+  root: ${hydra:runtime.cwd}/data
+to_tensor:
+  _target_: emg2qwerty.transforms.ToTensor
+  fields:
+  - emg_left
+  - emg_right
+band_rotation:
+  _target_: emg2qwerty.transforms.ForEach
+  transform:
+    _target_: emg2qwerty.transforms.RandomBandRotation
+    offsets:
+    - -1
+    - 0
+    - 1
+temporal_jitter:
+  _target_: emg2qwerty.transforms.TemporalAlignmentJitter
+  max_offset: 120
+resample:
+  _target_: emg2qwerty.transforms.Resample
+  orig_freq: 2000
+  new_freq: 2000
+logspec:
+  _target_: emg2qwerty.transforms.LogSpectrogram
+  n_fft: 64
+  hop_length: 16
+specaug:
+  _target_: emg2qwerty.transforms.SpecAugment
+  n_time_masks: 3
+  time_mask_param: 25
+  n_freq_masks: 2
+  freq_mask_param: 4
+transforms:
+  train:
+  - ${to_tensor}
+  - ${band_rotation}
+  - ${temporal_jitter}
+  - ${resample}
+  - ${logspec}
+  - ${specaug}
+  val:
+  - ${to_tensor}
+  - ${resample}
+  - ${logspec}
+  test: ${transforms.val}
+module:
+  _target_: emg2qwerty.lightning.ConformerCTCModule
+  in_features: 528
+  mlp_features:
+  - 192
+  electrode_channels: 16
+  conformer:
+    _target_: emg2qwerty.modules.ConformerEncoder
+    d_model: 384
+    cnn_channels:
+    - 64
+    - 128
+    - 256
+    cnn_kernel_sizes:
+    - 7
+    - 5
+    - 3
+    cnn_strides:
+    - 2
+    - 2
+    - 1
+    nhead: 8
+    num_layers: 4
+    dim_feedforward: 1024
+    conv_kernel_size: 15
+    dropout: 0.1
+    use_sinusoidal_pos_emb: true
+    max_len: 200000
+  optimizer: ${optimizer}
+  lr_scheduler: ${lr_scheduler}
+  decoder: ${decoder}
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000
+  padding:
+  - 1800
+  - 200
+  train_subset_fraction: 0.75
+  subset_seed: 42
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 0.001
+lr_scheduler:
+  scheduler:
+    _target_: pl_bolts.optimizers.lr_scheduler.LinearWarmupCosineAnnealingLR
+    warmup_epochs: 5
+    max_epochs: ${trainer.max_epochs}
+    warmup_start_lr: 1.0e-08
+    eta_min: 1.0e-06
+  interval: epoch
+decoder:
+  _target_: emg2qwerty.decoder.CTCGreedyDecoder
+seed: 1501
+batch_size: 32
+num_workers: 4
+train: true
+checkpoint: null
+monitor_metric: val/CER
+monitor_mode: min
+trainer:
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  max_epochs: 150
+  default_root_dir: ${hydra:runtime.output_dir}
+  fast_dev_run: true
+callbacks:
+- _target_: pytorch_lightning.callbacks.LearningRateMonitor
+- _target_: pytorch_lightning.callbacks.ModelCheckpoint
+  dirpath: ${hydra:runtime.output_dir}/checkpoints
+  monitor: ${monitor_metric}
+  mode: ${monitor_mode}
+  save_last: true
+  verbose: true
+
+[2026-03-11 05:39:36,048][__main__][INFO] - Instantiating LightningModule {'_target_': 'emg2qwerty.lightning.ConformerCTCModule', 'in_features': 528, 'mlp_features': [192], 'electrode_channels': 16, 'conformer': {'_target_': 'emg2qwerty.modules.ConformerEncoder', 'd_model': 384, 'cnn_channels': [64, 128, 256], 'cnn_kernel_sizes': [7, 5, 3], 'cnn_strides': [2, 2, 1], 'nhead': 8, 'num_layers': 4, 'dim_feedforward': 1024, 'conv_kernel_size': 15, 'dropout': 0.1, 'use_sinusoidal_pos_emb': True, 'max_len': 200000}, 'optimizer': '${optimizer}', 'lr_scheduler': '${lr_scheduler}', 'decoder': '${decoder}'}
+[2026-03-11 05:39:36,508][__main__][INFO] - Instantiating LightningDataModule {'_target_': 'emg2qwerty.lightning.WindowedEMGDataModule', 'window_length': 8000, 'padding': [1800, 200], 'train_subset_fraction': 0.75, 'subset_seed': 42}
+
+================================================================================
+DATAMODULE SETUP START
+================================================================================
+window_length         : 8000
+padding               : [1800, 200]
+batch_size            : 32
+num_workers           : 4
+train_subset_fraction : 0.75
+subset_seed           : 42
+num train sessions    : 16
+num val sessions      : 1
+num test sessions     : 1
+
+=== TRAIN SESSION DATASET LENGTHS ===
+num sessions: 16
+total windows in train: 3835
+
+Top 20 longest train sessions by dataset length:
+[007] windows=   297 session=/home/eagle/nndl/emg2qwerty/data/2021-06-02-1622679967-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[001] windows=   272 session=/home/eagle/nndl/emg2qwerty/data/2021-06-02-1622681518-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[014] windows=   266 session=/home/eagle/nndl/emg2qwerty/data/2021-06-05-1622884635-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[006] windows=   260 session=/home/eagle/nndl/emg2qwerty/data/2021-06-05-1622885888-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[010] windows=   254 session=/home/eagle/nndl/emg2qwerty/data/2021-06-05-1622889105-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[000] windows=   240 session=/home/eagle/nndl/emg2qwerty/data/2021-06-03-1622765527-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[008] windows=   234 session=/home/eagle/nndl/emg2qwerty/data/2021-06-03-1622764398-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[011] windows=   234 session=/home/eagle/nndl/emg2qwerty/data/2021-06-03-1622766673-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[003] windows=   227 session=/home/eagle/nndl/emg2qwerty/data/2021-07-22-1627003020-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[004] windows=   226 session=/home/eagle/nndl/emg2qwerty/data/2021-07-21-1626916256-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[012] windows=   224 session=/home/eagle/nndl/emg2qwerty/data/2021-06-04-1622861066-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[002] windows=   223 session=/home/eagle/nndl/emg2qwerty/data/2021-06-04-1622863166-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[005] windows=   223 session=/home/eagle/nndl/emg2qwerty/data/2021-07-22-1627004019-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[009] windows=   219 session=/home/eagle/nndl/emg2qwerty/data/2021-07-21-1626917264-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[013] windows=   218 session=/home/eagle/nndl/emg2qwerty/data/2021-07-22-1627001995-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+[015] windows=   218 session=/home/eagle/nndl/emg2qwerty/data/2021-07-21-1626915176-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+
+Using train subset: 2876/3835 (75.0%)
+
+=== TRAIN SUBSET DEBUG ===
+train_subset_fraction: 0.75
+subset_seed         : 42
+total train windows : 3835
+subset size         : 2876
+num sampled indices : 2876
+
+First 20 sampled indices:
+[0, 1, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 23]
+
+Last 20 sampled indices:
+[3811, 3812, 3813, 3815, 3816, 3817, 3818, 3819, 3821, 3822, 3823, 3825, 3826, 3827, 3829, 3830, 3831, 3832, 3833, 3834]
+
+unique sampled indices: 2876
+duplicate sampled indices: 0
+
+Final train dataset length after subsetting: 2876
+
+=== TRAIN SAMPLE BATCH STATS ===
+inputs.shape           : (621, 8, 2, 16, 33)
+targets.shape          : (25, 8)
+input_lengths.shape    : (8,)
+target_lengths.shape   : (8,)
+inputs.min             : -5.9999775886535645
+inputs.max             : 5.114409446716309
+inputs.mean            : 0.5468100905418396
+inputs.std             : 1.0555450916290283
+has_nan(inputs)        : False
+has_inf(inputs)        : False
+input_lengths min/max  : 564 621
+target_lengths min/max : 0 25
+first 8 target_lengths : [0, 25, 23, 22, 19, 18, 14, 19]
+first 8 input_lengths  : [564, 617, 619, 617, 620, 621, 619, 620]
+
+Final val dataset length: 212
+
+=== VAL SESSION DATASET LENGTHS ===
+num sessions: 1
+total windows in val: 212
+
+Top 20 longest val sessions by dataset length:
+[000] windows=   212 session=/home/eagle/nndl/emg2qwerty/data/2021-06-04-1622862148-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+
+=== VAL SAMPLE BATCH STATS ===
+inputs.shape           : (622, 8, 2, 16, 33)
+targets.shape          : (27, 8)
+input_lengths.shape    : (8,)
+target_lengths.shape   : (8,)
+inputs.min             : -5.999992370605469
+inputs.max             : 5.823258399963379
+inputs.mean            : 0.7174367904663086
+inputs.std             : 1.1405165195465088
+has_nan(inputs)        : False
+has_inf(inputs)        : False
+input_lengths min/max  : 509 622
+target_lengths min/max : 0 27
+first 8 target_lengths : [0, 26, 25, 20, 21, 25, 23, 27]
+first 8 input_lengths  : [509, 622, 622, 622, 622, 622, 622, 622]
+
+Final test dataset length: 281
+
+=== TEST SESSION DATASET LENGTHS ===
+num sessions: 1
+total windows in test: 281
+
+Top 20 longest test sessions by dataset length:
+[000] windows=   281 session=/home/eagle/nndl/emg2qwerty/data/2021-06-02-1622682789-keystrokes-dca-study@1-0efbe614-9ae6-4131-9192-4398359b4f5f.hdf5
+
+================================================================================
+DATAMODULE SETUP END
+================================================================================
+Training: 0it [00:00, ?it/s]Training:   0%|          | 0/2 [00:00<?, ?it/s]Epoch 0:   0%|          | 0/2 [00:00<?, ?it/s] Epoch 0:  50%|█████     | 1/2 [00:03<00:03,  3.69s/it]Epoch 0:  50%|█████     | 1/2 [00:03<00:03,  3.69s/it, loss=54.9, v_num=]
+Validation: 0it [00:00, ?it/s][A
+Validation:   0%|          | 0/1 [00:00<?, ?it/s][A
+Validation DataLoader 0:   0%|          | 0/1 [00:00<?, ?it/s][A
+Validation DataLoader 0: 100%|██████████| 1/1 [00:00<00:00,  4.15it/s][AEpoch 0: 100%|██████████| 2/2 [00:05<00:00,  2.61s/it, loss=54.9, v_num=]Epoch 0: 100%|██████████| 2/2 [00:05<00:00,  2.62s/it, loss=54.9, v_num=]
+                                                                      [AEpoch 0: 100%|██████████| 2/2 [00:05<00:00,  2.62s/it, loss=54.9, v_num=]Epoch 0: 100%|██████████| 2/2 [00:05<00:00,  2.69s/it, loss=54.9, v_num=]

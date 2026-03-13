@@ -913,3 +913,54 @@ class ConformerEncoder(nn.Module):
         if return_lengths:
             return x, out_lengths
         return x
+
+class LSTMEncoder(nn.Module):
+    """
+    Input:  (T, N, num_features)
+    Output: (T, N, hidden_size * num_directions) if no projection
+            (T, N, output_size) if projection is used
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int = 256,
+        num_layers: int = 2,
+        bidirectional: bool = True,
+        dropout: float = 0.1,
+        output_size: int | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.bidirectional = bidirectional
+        self.hidden_size = hidden_size
+        self.num_directions = 2 if bidirectional else 1
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional,
+        )
+
+        lstm_out_size = hidden_size * self.num_directions
+
+        self.proj = None
+        if output_size is not None and output_size != lstm_out_size:
+            self.proj = nn.Linear(lstm_out_size, output_size)
+            self.norm = nn.LayerNorm(output_size)
+            self.output_size = output_size
+        else:
+            self.norm = nn.LayerNorm(lstm_out_size)
+            self.output_size = lstm_out_size
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        # inputs: (T, N, C)
+        x, _ = self.lstm(inputs)  # (T, N, H * directions)
+
+        if self.proj is not None:
+            x = self.proj(x)
+
+        x = self.norm(x)
+        return x

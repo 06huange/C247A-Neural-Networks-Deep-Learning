@@ -154,6 +154,30 @@ class TemporalAlignmentJitter:
         return torch.stack([left, right], dim=self.stack_dim)
 
 @dataclass
+class AddGaussianNoise:
+    """Adds zero-mean Gaussian noise to the input tensor.
+
+    Args:
+        std (float): Standard deviation of the Gaussian noise.
+        p (float): Probability of applying the transform.
+    """
+
+    std: float = 0.01
+    p: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.std < 0:
+            raise ValueError("std must be non-negative")
+        if not (0.0 <= self.p <= 1.0):
+            raise ValueError("p must be in [0, 1]")
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.std == 0 or np.random.rand() > self.p:
+            return tensor
+        noise = torch.randn_like(tensor) * self.std
+        return tensor + noise
+        
+@dataclass
 class Resample:
     """Resamples the raw EMG signal along the time dimension.
 
