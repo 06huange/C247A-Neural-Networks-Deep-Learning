@@ -1,6 +1,8 @@
 # C147/247 Final Project
 ### Winter 2026 
 
+Project Members: Kuo Peng Huang 206629395, Gyungmin Roh 706626139, Alexander Trinh 906631470
+
 This course project is built upon the emg2qwerty work from Meta. The first section of this README provides some guidance for working with the repo and contains a running list of FAQs. **Note that the rest of the README is from the original repo and we encourage you to take a look at their work.**
 
 ## Guiding Tips + FAQs
